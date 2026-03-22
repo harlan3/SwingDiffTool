@@ -51,12 +51,16 @@ public class SwingDiffTool extends JFrame {
     private final Action undoAction = new AbstractAction("Undo", new UndoIcon()) {
         @Override public void actionPerformed(ActionEvent e) { undoIn(lastFocusedSide); }
     };
+    private final Action searchAction = new AbstractAction("Search", new SearchIcon()) {
+        @Override public void actionPerformed(ActionEvent e) { performSearchInActivePane(); }
+    };
 
     // ---- Per-side path controls (above each text area) ----
     private final JTextField leftPathField = new JTextField();
     private final JTextField rightPathField = new JTextField();
     private final JButton leftBrowseBtn = new JButton("Browse...");
     private final JButton rightBrowseBtn = new JButton("Browse...");
+    private final JTextField searchField = new JTextField(18);
 
     // ---- Editors (plain text) ----
     private final JTextArea leftArea = new JTextArea();
@@ -165,7 +169,7 @@ public class SwingDiffTool extends JFrame {
         debounceTimer.setRepeats(false);
 
         // Wire
-        wireActions();                // browse + gutter click
+        wireActions();                // browse + gutter click + search
         wireUndoKeybindings();
         wireUndoManagers();
         wireDocumentListeners();
@@ -205,10 +209,18 @@ public class SwingDiffTool extends JFrame {
         undo.setText("");
         undo.setToolTipText("Undo (active side)");
 
+        JButton searchBtn = new JButton(searchAction);
+        searchBtn.setText("");
+        searchBtn.setToolTipText("Search in active pane");
+
         styleRibbonButton(diffBtn);
         styleRibbonButton(saveL);
         styleRibbonButton(saveR);
         styleRibbonButton(undo);
+        styleRibbonButton(searchBtn);
+
+        searchField.setToolTipText("Search active pane");
+        searchField.setPreferredSize(new Dimension(220, 34));
 
         tb.add(diffBtn);
         tb.addSeparator(new Dimension(10, 1));
@@ -216,6 +228,9 @@ public class SwingDiffTool extends JFrame {
         tb.add(saveR);
         tb.addSeparator(new Dimension(10, 1));
         tb.add(undo);
+        tb.addSeparator(new Dimension(10, 1));
+        tb.add(searchField);
+        tb.add(searchBtn);
 
         undoAction.setEnabled(false);
         return tb;
@@ -348,6 +363,7 @@ public class SwingDiffTool extends JFrame {
     private void wireActions() {
         leftBrowseBtn.addActionListener(e -> chooseFile(true));
         rightBrowseBtn.addActionListener(e -> chooseFile(false));
+        searchField.addActionListener(e -> performSearchInActivePane());
 
         gutter.addMouseListener(new MouseAdapter() {
             @Override
@@ -385,6 +401,63 @@ public class SwingDiffTool extends JFrame {
                 restoreTopLinesLater(lTop, rTop);
             }
         });
+    }
+
+
+    private void performSearchInActivePane() {
+        String query = searchField.getText();
+        if (query == null) query = "";
+        query = query.trim();
+
+        if (query.isEmpty()) {
+            Toolkit.getDefaultToolkit().beep();
+            searchField.requestFocusInWindow();
+            return;
+        }
+
+        JTextArea activeArea = (lastFocusedSide == Side.RIGHT) ? rightArea : leftArea;
+        if (!activeArea.isFocusOwner()) {
+            if (rightArea.isFocusOwner()) {
+                activeArea = rightArea;
+                lastFocusedSide = Side.RIGHT;
+            } else if (leftArea.isFocusOwner()) {
+                activeArea = leftArea;
+                lastFocusedSide = Side.LEFT;
+            }
+        }
+
+        String text = activeArea.getText();
+        if (text.isEmpty()) {
+            Toolkit.getDefaultToolkit().beep();
+            activeArea.requestFocusInWindow();
+            return;
+        }
+
+        int start = Math.max(activeArea.getCaretPosition(), activeArea.getSelectionEnd());
+        int found = text.indexOf(query, start);
+        if (found < 0 && start > 0) {
+            found = text.indexOf(query);
+        }
+
+        if (found < 0) {
+            Toolkit.getDefaultToolkit().beep();
+            JOptionPane.showMessageDialog(
+                    this,
+                    "Text not found in the active pane.",
+                    "Search",
+                    JOptionPane.INFORMATION_MESSAGE
+            );
+            activeArea.requestFocusInWindow();
+            return;
+        }
+
+        int end = found + query.length();
+        activeArea.requestFocusInWindow();
+        activeArea.select(found, end);
+        try {
+            Rectangle r = activeArea.modelToView2D(found).getBounds();
+            activeArea.scrollRectToVisible(r);
+        } catch (BadLocationException ignored) {}
     }
 
     private void chooseFile(boolean left) {
@@ -1122,6 +1195,16 @@ public class SwingDiffTool extends JFrame {
             );
             g2.fillPolygon(arrow);
             g2.drawArc(4, 3, 10, 10, 120, 240);
+        }
+    }
+
+    private static class SearchIcon extends SimpleIcon {
+        SearchIcon() { super(16, 16); }
+        @Override void paint(Graphics2D g2, boolean enabled) {
+            g2.setColor(enabled ? new Color(70, 70, 70) : new Color(160, 160, 160));
+            g2.setStroke(new BasicStroke(2f));
+            g2.drawOval(2, 2, 8, 8);
+            g2.drawLine(9, 9, 14, 14);
         }
     }
 
