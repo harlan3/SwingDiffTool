@@ -27,8 +27,11 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
 import java.util.*;
 import java.util.List;
+import java.util.prefs.Preferences;
 
 public class SwingDiffTool extends JFrame {
+
+    private static final String PREF_LAST_DIR = "lastDirectory";
 
     // ---- Ribbon actions ----
     private final Action diffAction = new AbstractAction("Diff", new DiffIcon()) {
@@ -54,6 +57,9 @@ public class SwingDiffTool extends JFrame {
     private final Action searchAction = new AbstractAction("Search", new SearchIcon()) {
         @Override public void actionPerformed(ActionEvent e) { performSearchInActivePane(); }
     };
+    private final Action nextChangeAction = new AbstractAction("Next Change", new NextChangeIcon()) {
+        @Override public void actionPerformed(ActionEvent e) { goToNextChangeInActivePane(); }
+    };
 
     // ---- Per-side path controls (above each text area) ----
     private final JTextField leftPathField = new JTextField();
@@ -71,9 +77,14 @@ public class SwingDiffTool extends JFrame {
     private final Gutter gutter = new Gutter();
 
     // ---- Highlighting ----
-    private final Color DIFF_HL = new Color(173, 216, 230); // light blue
+    private final Color DIFF_HL = new Color(173, 216, 230); // light blue for diff blocks
+    private final Color TEXT_SELECTION_HL = new Color(214, 234, 248); // lighter blue for selected/search text
     private final Highlighter.HighlightPainter diffPainter =
             new DefaultHighlighter.DefaultHighlightPainter(DIFF_HL);
+
+    // ---- Preferences ----
+    private final Preferences prefs = Preferences.userNodeForPackage(SwingDiffTool.class);
+    private Path lastDirectory;
 
     // ---- Model ----
     private Path leftPath;
@@ -108,10 +119,16 @@ public class SwingDiffTool extends JFrame {
     // Listener instances to reattach after document replacement
     private DocumentListener sharedDocListener;
 
+    // Next-change traversal state
+    private int leftNextChangeIndex = -1;
+    private int rightNextChangeIndex = -1;
+
     public SwingDiffTool() {
         super("Swing Diff Tool");
         setDefaultCloseOperation(WindowConstants.EXIT_ON_CLOSE);
         setMinimumSize(new Dimension(1350, 860));
+
+        loadLastDirectoryPreference();
 
         // Ribbon / toolbar
         JToolBar ribbon = buildRibbon();
@@ -129,12 +146,20 @@ public class SwingDiffTool extends JFrame {
         leftScroll.setRowHeaderView(new LineNumberView(leftArea));
         rightScroll.setRowHeaderView(new LineNumberView(rightArea));
 
-        // focus tracking for undo
+        // focus tracking for undo / next change
         leftArea.addFocusListener(new FocusAdapter() {
-            @Override public void focusGained(FocusEvent e) { lastFocusedSide = Side.LEFT; updateUndoEnabled(); }
+            @Override public void focusGained(FocusEvent e) {
+                lastFocusedSide = Side.LEFT;
+                updateUndoEnabled();
+                updateNextChangeEnabled();
+            }
         });
         rightArea.addFocusListener(new FocusAdapter() {
-            @Override public void focusGained(FocusEvent e) { lastFocusedSide = Side.RIGHT; updateUndoEnabled(); }
+            @Override public void focusGained(FocusEvent e) {
+                lastFocusedSide = Side.RIGHT;
+                updateUndoEnabled();
+                updateNextChangeEnabled();
+            }
         });
 
         // Left panel: header + scroll
@@ -169,7 +194,7 @@ public class SwingDiffTool extends JFrame {
         debounceTimer.setRepeats(false);
 
         // Wire
-        wireActions();                // browse + gutter click + search
+        wireActions();                // browse + gutter click + search + next change
         wireUndoKeybindings();
         wireUndoManagers();
         wireDocumentListeners();
@@ -178,6 +203,37 @@ public class SwingDiffTool extends JFrame {
         updateUndoEnabled();
         computeDiffAndRender(); // initial diff at startup (empty buffers)
         setVisible(true);
+    }
+
+    private void loadLastDirectoryPreference() {
+        String stored = prefs.get(PREF_LAST_DIR, null);
+        if (stored == null || stored.isBlank()) return;
+
+        try {
+            Path p = Paths.get(stored);
+            if (Files.isDirectory(p)) {
+                lastDirectory = p;
+            }
+        } catch (Exception ignored) {
+        }
+    }
+
+    private void rememberDirectory(Path path) {
+        if (path == null) return;
+
+        Path dir = Files.isDirectory(path) ? path : path.getParent();
+        if (dir == null) return;
+
+        lastDirectory = dir;
+        prefs.put(PREF_LAST_DIR, dir.toAbsolutePath().toString());
+    }
+
+    private JFileChooser createFileChooser() {
+        JFileChooser fc = new JFileChooser();
+        if (lastDirectory != null && Files.isDirectory(lastDirectory)) {
+            fc.setCurrentDirectory(lastDirectory.toFile());
+        }
+        return fc;
     }
 
     private void configurePathField(JTextField tf) {
@@ -213,11 +269,16 @@ public class SwingDiffTool extends JFrame {
         searchBtn.setText("");
         searchBtn.setToolTipText("Search in active pane");
 
+        JButton nextChangeBtn = new JButton(nextChangeAction);
+        nextChangeBtn.setText("");
+        nextChangeBtn.setToolTipText("Next Change (active pane)");
+
         styleRibbonButton(diffBtn);
         styleRibbonButton(saveL);
         styleRibbonButton(saveR);
         styleRibbonButton(undo);
         styleRibbonButton(searchBtn);
+        styleRibbonButton(nextChangeBtn);
 
         searchField.setToolTipText("Search active pane");
         searchField.setPreferredSize(new Dimension(220, 34));
@@ -228,11 +289,13 @@ public class SwingDiffTool extends JFrame {
         tb.add(saveR);
         tb.addSeparator(new Dimension(10, 1));
         tb.add(undo);
+        tb.add(nextChangeBtn);
         tb.addSeparator(new Dimension(10, 1));
         tb.add(searchField);
         tb.add(searchBtn);
 
         undoAction.setEnabled(false);
+        nextChangeAction.setEnabled(false);
         return tb;
     }
 
@@ -262,6 +325,8 @@ public class SwingDiffTool extends JFrame {
         area.setLineWrap(false);
         area.setWrapStyleWord(false);
         area.setTabSize(4);
+        area.setSelectionColor(TEXT_SELECTION_HL);
+        area.setSelectedTextColor(Color.BLACK);
     }
 
     // ---------------- Scroll-preserve helpers ----------------
@@ -307,6 +372,7 @@ public class SwingDiffTool extends JFrame {
             patch = null;
             chunks.clear();
             dismissedChunkIds.clear();
+            resetNextChangeTraversal();
 
             gutter.setChunks(List.of());
             gutter.repaint();
@@ -393,10 +459,13 @@ public class SwingDiffTool extends JFrame {
                 leftLineStartOffsets = computeLineStartOffsets(leftArea.getDocument());
                 rightLineStartOffsets = computeLineStartOffsets(rightArea.getDocument());
 
+                resetNextChangeTraversal();
+
                 // Update visuals (no diff recompute)
                 refreshHighlightsOnly();
                 updateGutterMarkers();
                 updateUndoEnabled();
+                updateNextChangeEnabled();
 
                 restoreTopLinesLater(lTop, rTop);
             }
@@ -415,16 +484,7 @@ public class SwingDiffTool extends JFrame {
             return;
         }
 
-        JTextArea activeArea = (lastFocusedSide == Side.RIGHT) ? rightArea : leftArea;
-        if (!activeArea.isFocusOwner()) {
-            if (rightArea.isFocusOwner()) {
-                activeArea = rightArea;
-                lastFocusedSide = Side.RIGHT;
-            } else if (leftArea.isFocusOwner()) {
-                activeArea = leftArea;
-                lastFocusedSide = Side.LEFT;
-            }
-        }
+        JTextArea activeArea = getActiveArea();
 
         String text = activeArea.getText();
         if (text.isEmpty()) {
@@ -460,8 +520,134 @@ public class SwingDiffTool extends JFrame {
         } catch (BadLocationException ignored) {}
     }
 
+    private void goToNextChangeInActivePane() {
+        List<ChunkInfo> visibleChunks = filterVisibleChunks();
+        if (visibleChunks.isEmpty()) {
+            Toolkit.getDefaultToolkit().beep();
+            return;
+        }
+
+        Side activeSide = getActiveSide();
+        JTextArea area = (activeSide == Side.LEFT) ? leftArea : rightArea;
+        JScrollPane scroll = (activeSide == Side.LEFT) ? leftScroll : rightScroll;
+
+        int nextIndex = findNextChunkIndexForSide(visibleChunks, activeSide);
+        if (nextIndex < 0) {
+            Toolkit.getDefaultToolkit().beep();
+            return;
+        }
+
+        ChunkInfo chunk = visibleChunks.get(nextIndex);
+        if (activeSide == Side.LEFT) {
+            leftNextChangeIndex = nextIndex;
+        } else {
+            rightNextChangeIndex = nextIndex;
+        }
+
+        int startLine = (activeSide == Side.LEFT) ? chunk.leftPos : chunk.rightPos;
+        int lineCount = (activeSide == Side.LEFT) ? chunk.leftSize : chunk.rightSize;
+        int[] starts = (activeSide == Side.LEFT) ? leftLineStartOffsets : rightLineStartOffsets;
+
+        focusChangeInPane(area, scroll, starts, startLine, lineCount);
+    }
+
+    private int findNextChunkIndexForSide(List<ChunkInfo> visibleChunks, Side side) {
+        int currentIndex = (side == Side.LEFT) ? leftNextChangeIndex : rightNextChangeIndex;
+        if (visibleChunks.isEmpty()) return -1;
+
+        int start = currentIndex + 1;
+        if (start >= visibleChunks.size()) start = 0;
+        return start;
+    }
+
+    private void focusChangeInPane(JTextArea area, JScrollPane scroll, int[] starts, int startLine, int lineCount) {
+        int docLen = area.getDocument().getLength();
+        int safeStartLine = Math.max(0, startLine);
+        int safeCount = Math.max(1, lineCount);
+
+        int startOffset = offsetForLineSafe(starts, docLen, safeStartLine);
+        int endOffset = offsetForLineSafe(starts, docLen, safeStartLine + safeCount);
+        if (endOffset <= startOffset) {
+            endOffset = Math.min(docLen, startOffset + 1);
+        }
+
+        area.requestFocusInWindow();
+        area.setCaretPosition(startOffset);
+        area.moveCaretPosition(endOffset);
+
+        try {
+            Rectangle startRect = area.modelToView2D(startOffset).getBounds();
+            Rectangle endRect = area.modelToView2D(Math.max(startOffset, endOffset - 1)).getBounds();
+            Rectangle union = startRect.union(endRect);
+            centerChangeInViewport(scroll, union);
+        } catch (BadLocationException ignored) {
+        }
+    }
+
+    private void centerChangeInViewport(JScrollPane scroll, Rectangle targetRect) {
+        if (targetRect == null) return;
+
+        JViewport viewport = scroll.getViewport();
+        if (viewport == null) return;
+
+        Rectangle viewRect = viewport.getViewRect();
+        Dimension viewSize = viewport.getViewSize();
+
+        int padding = 12;
+        Rectangle padded = new Rectangle(targetRect);
+        padded.y = Math.max(0, padded.y - padding);
+        padded.height = Math.max(padded.height + (padding * 2), 1);
+
+        int desiredY = padded.y + (padded.height / 2) - (viewRect.height / 2);
+        int maxY = Math.max(0, viewSize.height - viewRect.height);
+        int clampedY = Math.max(0, Math.min(desiredY, maxY));
+
+        int desiredX = viewRect.x;
+        if (padded.x < viewRect.x || (padded.x + padded.width) > (viewRect.x + viewRect.width)) {
+            desiredX = Math.max(0, padded.x - 24);
+            int maxX = Math.max(0, viewSize.width - viewRect.width);
+            desiredX = Math.min(desiredX, maxX);
+        }
+
+        viewport.setViewPosition(new Point(desiredX, clampedY));
+    }
+
+    private JTextArea getActiveArea() {
+        if (rightArea.isFocusOwner()) {
+            lastFocusedSide = Side.RIGHT;
+            return rightArea;
+        }
+        if (leftArea.isFocusOwner()) {
+            lastFocusedSide = Side.LEFT;
+            return leftArea;
+        }
+        return (lastFocusedSide == Side.RIGHT) ? rightArea : leftArea;
+    }
+
+    private Side getActiveSide() {
+        if (rightArea.isFocusOwner()) {
+            lastFocusedSide = Side.RIGHT;
+            return Side.RIGHT;
+        }
+        if (leftArea.isFocusOwner()) {
+            lastFocusedSide = Side.LEFT;
+            return Side.LEFT;
+        }
+        return lastFocusedSide;
+    }
+
+    private void resetNextChangeTraversal() {
+        leftNextChangeIndex = -1;
+        rightNextChangeIndex = -1;
+        updateNextChangeEnabled();
+    }
+
+    private void updateNextChangeEnabled() {
+        nextChangeAction.setEnabled(!filterVisibleChunks().isEmpty());
+    }
+
     private void chooseFile(boolean left) {
-        JFileChooser fc = new JFileChooser();
+        JFileChooser fc = createFileChooser();
         fc.setFileSelectionMode(JFileChooser.FILES_ONLY);
         fc.setMultiSelectionEnabled(false);
 
@@ -469,6 +655,7 @@ public class SwingDiffTool extends JFrame {
         if (res != JFileChooser.APPROVE_OPTION) return;
 
         Path p = fc.getSelectedFile().toPath();
+        rememberDirectory(p);
         if (left) {
             leftPath = p;
             leftPathField.setText(p.toString());
@@ -483,6 +670,7 @@ public class SwingDiffTool extends JFrame {
         leftUndo.discardAllEdits();
         rightUndo.discardAllEdits();
         updateUndoEnabled();
+        resetNextChangeTraversal();
 
         computeDiffAndRender();
     }
@@ -510,7 +698,7 @@ public class SwingDiffTool extends JFrame {
         Path currentPath = left ? leftPath : rightPath;
 
         if (currentPath == null) {
-            JFileChooser fc = new JFileChooser();
+            JFileChooser fc = createFileChooser();
             fc.setFileSelectionMode(JFileChooser.FILES_ONLY);
             int res = fc.showSaveDialog(this);
             if (res != JFileChooser.APPROVE_OPTION) return;
@@ -553,6 +741,7 @@ public class SwingDiffTool extends JFrame {
             Files.writeString(currentPath, area.getText(), charset,
                     StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING, StandardOpenOption.WRITE);
 
+            rememberDirectory(currentPath);
             if (left) {
                 leftPath = currentPath;
                 leftPathField.setText(currentPath.toString());
@@ -654,6 +843,7 @@ public class SwingDiffTool extends JFrame {
 
         chunks.clear();
         dismissedChunkIds.clear();
+        resetNextChangeTraversal();
 
         for (AbstractDelta<String> d : patch.getDeltas()) {
             Chunk<String> src = d.getSource();
@@ -674,6 +864,7 @@ public class SwingDiffTool extends JFrame {
 
         refreshHighlightsOnly();
         updateGutterMarkers();
+        updateNextChangeEnabled();
     }
 
     private void refreshHighlightsOnly() {
@@ -1205,6 +1396,21 @@ public class SwingDiffTool extends JFrame {
             g2.setStroke(new BasicStroke(2f));
             g2.drawOval(2, 2, 8, 8);
             g2.drawLine(9, 9, 14, 14);
+        }
+    }
+
+    private static class NextChangeIcon extends SimpleIcon {
+        NextChangeIcon() { super(16, 16); }
+        @Override void paint(Graphics2D g2, boolean enabled) {
+            g2.setColor(enabled ? new Color(70, 70, 70) : new Color(160, 160, 160));
+            g2.setStroke(new BasicStroke(2f));
+            g2.drawLine(3, 3, 3, 13);
+            Polygon p = new Polygon(
+                    new int[]{6, 13, 6},
+                    new int[]{3, 8, 13},
+                    3
+            );
+            g2.fillPolygon(p);
         }
     }
 
