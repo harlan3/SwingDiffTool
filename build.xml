@@ -22,7 +22,7 @@
     
    <!-- Compiles the java code -->
    <target name="compile" depends="clean, makedir">
-      <javac srcdir="${src.dir}" destdir="${build.dir}" source="21" target="21" debuglevel="${debuglevel}">
+      <javac srcdir="${src.dir}" destdir="${build.dir}" source="20" target="20" debuglevel="${debuglevel}">
          <classpath>
             <pathelement path="${lib.dir}/java-diff-utils.jar"/>
          </classpath>
