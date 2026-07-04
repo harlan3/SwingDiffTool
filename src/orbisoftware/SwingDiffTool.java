@@ -101,6 +101,9 @@ public class SwingDiffTool extends JFrame {
     private final Timer debounceTimer;
     private boolean suppressAutoDiff = false;
 
+    // Shared editor presentation option.
+    private boolean wordWrapEnabled = false;
+
     // Listener instances to reattach after document replacement
     private DocumentListener sharedDocListener;
 
@@ -205,10 +208,21 @@ public class SwingDiffTool extends JFrame {
         undo.setText("");
         undo.setToolTipText("Undo (active side)");
 
+        // A labeled toggle makes the word-wrap control clearly visible in the toolbar.
+        JToggleButton wordWrap = new JToggleButton("Wrap", new WordWrapIcon());
+        wordWrap.setToolTipText("Turn word wrap on or off for both buffers");
+        wordWrap.setSelected(wordWrapEnabled);
+        wordWrap.setHorizontalTextPosition(SwingConstants.RIGHT);
+        wordWrap.setIconTextGap(4);
+        wordWrap.addActionListener(e -> setWordWrapEnabled(wordWrap.isSelected()));
+
         styleRibbonButton(diffBtn);
         styleRibbonButton(saveL);
         styleRibbonButton(saveR);
         styleRibbonButton(undo);
+        wordWrap.setFocusable(false);
+        wordWrap.setPreferredSize(new Dimension(82, 34));
+        wordWrap.setMargin(new Insets(4, 7, 4, 7));
 
         tb.add(diffBtn);
         tb.addSeparator(new Dimension(10, 1));
@@ -216,6 +230,7 @@ public class SwingDiffTool extends JFrame {
         tb.add(saveR);
         tb.addSeparator(new Dimension(10, 1));
         tb.add(undo);
+        tb.add(wordWrap);
 
         undoAction.setEnabled(false);
         return tb;
@@ -244,9 +259,20 @@ public class SwingDiffTool extends JFrame {
         area.setFont(new Font(Font.MONOSPACED, Font.PLAIN, 13));
         area.setMargin(new Insets(8, 8, 8, 8));
         area.setBackground(Color.WHITE);
-        area.setLineWrap(false);
-        area.setWrapStyleWord(false);
+        area.setLineWrap(wordWrapEnabled);
+        area.setWrapStyleWord(wordWrapEnabled);
         area.setTabSize(4);
+    }
+
+    private void setWordWrapEnabled(boolean enabled) {
+        wordWrapEnabled = enabled;
+        leftArea.setLineWrap(enabled);
+        leftArea.setWrapStyleWord(enabled);
+        rightArea.setLineWrap(enabled);
+        rightArea.setWrapStyleWord(enabled);
+
+        // Wrapping changes visual rows but not document lines; refresh the gutter positions.
+        SwingUtilities.invokeLater(this::updateGutterMarkers);
     }
 
     // ---------------- Scroll-preserve helpers ----------------
@@ -1120,6 +1146,25 @@ public class SwingDiffTool extends JFrame {
                 );
                 g2.fillPolygon(head);
             }
+        }
+    }
+
+    private static class WordWrapIcon extends SimpleIcon {
+        WordWrapIcon() { super(18, 16); }
+
+        @Override void paint(Graphics2D g2, boolean enabled) {
+            g2.setColor(enabled ? new Color(70, 70, 70) : new Color(160, 160, 160));
+            // Three text lines; the lower line bends back to show wrapping.
+            g2.drawLine(1, 3, 16, 3);
+            g2.drawLine(1, 7, 13, 7);
+            g2.drawLine(1, 11, 10, 11);
+            g2.drawArc(9, 8, 6, 6, 270, 180);
+            Polygon arrow = new Polygon(
+                    new int[]{13, 17, 13},
+                    new int[]{12, 14, 16},
+                    3
+            );
+            g2.fillPolygon(arrow);
         }
     }
 
